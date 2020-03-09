@@ -116,10 +116,13 @@ class PPO(object):
         return norm_dist, params
 
     def choose_action(self, s):
-        step_len = s[0]
-        s = s[np.newaxis, :]
-        a = self.sess.run(self.sample_op, {self.tfs: s})[0]
-        return np.clip(a, -step_len, step_len)
+        if (type(s) is np.ndarray) & s.size > 0:
+            step_len = s[0]
+            s = s[np.newaxis, :]
+            a = self.sess.run(self.sample_op, {self.tfs: s})[0]
+            return np.clip(a, -step_len, step_len)
+        else:
+            return [0]
 
     def get_v(self, s):
         if s.ndim < 2: s = s[np.newaxis, :]
@@ -145,7 +148,7 @@ class Worker(object):
                     buffer_s, buffer_a, buffer_r = [], [], []
                     # clear history buffer, use new policy to collect data
                 a = self.ppo.choose_action(s)
-                s_, r, done, _ = self.environment.step(a)
+                s_, r = self.environment.step(a)
                 buffer_s.append(s)
                 buffer_a.append(a)
                 buffer_r.append((r + 8) / 8)  # normalize reward, find to be useful
@@ -205,10 +208,10 @@ def adjust_job():
                 after_comp = last_point_json['afterComp']
                 comp_std = math.sqrt(comp_error / before_comp)
                 comp_proportion = before_comp / after_comp
-                s = env.render()[0]
-                change = GLOBAL_PPO.choose_action(s)
-                action = {'change': change, 'comp_proportion': comp_proportion, 'comp_std': comp_std}
-                comp_dev = env.step(action)[0]
+                update = {'comp_proportion': comp_proportion, 'comp_std': comp_std}
+                env.update(update)
+                s = env.render()
+                comp_dev = env.step(GLOBAL_PPO.choose_action(s))[0][0]
                 last_point_json['compDev'] = comp_dev
                 last_point_json['nextTime'] = next_time + (comp_frequency % 60) * LAST_POINT_ADJUST_TIME
                 last_point_json['beforeSum'] = last_point_json['beforeSum'] + before_comp
