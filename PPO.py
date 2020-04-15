@@ -7,44 +7,19 @@ tensorflow r1.3
 import tensorflow as tf
 import numpy as np
 import matplotlib.pyplot as plt
+import traceback
 import threading
 import queue
 from environment import Adjust_env
-import redis
-import py_snappy
-import json
-from apscheduler.schedulers.blocking import BlockingScheduler
 import math
 from flask import Flask
 from flask import jsonify
 from flask import request
 
 app = Flask(__name__)
-redis_json = {}
-env = Adjust_env()
 
-
-@app.route('/adjust', methods=['POST'])
-def adjust():
-    if request.method == 'POST':
-        global redis_json
-        redis_json = request.json
-        print(redis_json)
-        scheduler = BlockingScheduler()
-        scheduler.add_job(adjust_job, 'interval', seconds=300)
-        scheduler.start()
-        return jsonify({'status': 0, "msg": 'start rl adjust'})
-    else:
-        return jsonify({'status': 1, "msg": 'start rl adjust wrong'})
-
-
-@app.route('/adjust', methods=['GET'])
-def adjust_get():
-    return jsonify({'status': 1, "msg": 'start rl adjust wrong'})
-
-
-EP_MAX = 1000
-EP_LEN = 200
+EP_MAX = 20000
+EP_LEN = 3000
 N_WORKER = 4  # parallel workers
 GAMMA = 0.9  # reward discount factor
 A_LR = 0.0001  # learning rate for actor
@@ -52,15 +27,37 @@ C_LR = 0.0002  # learning rate for critic
 MIN_BATCH_SIZE = 64  # minimum batch size for updating PPO
 UPDATE_STEP = 10  # loop update operation n-steps
 EPSILON = 0.2  # for clipping surrogate objective
-GAME = 'Pendulum-v0'
 S_DIM, A_DIM = 3, 1  # state and action dimension
-LAST_POINT_ADJUST_TIME = 30000
+LAST_POINT_ADJUST_TIME = 1000 * 60 * 30
+environments = {}
+
+
+@app.route('/adjust', methods=['POST'])
+def adjust():
+    if request.method == 'POST':
+        try:
+            last_compress_point = request.json
+            # print(last_compress_point)
+            key = last_compress_point['lastPoint']['assertId'] + '/' + last_compress_point['lastPoint'][
+                'modelId'] + '/' + last_compress_point['lastPoint']['measurement']
+            print(key)
+            last_compress_point = adjust_param(last_compress_point, key)
+            return jsonify({'status': 0, "msg": 'OK', "data": last_compress_point})
+        except Exception as e:
+            return jsonify({'status': 1, "msg": 'rl adjust had something wrong!'})
+    else:
+        return jsonify({'status': 1, "msg": 'rl adjust api should be post'})
+
+
+@app.route('/adjust', methods=['GET'])
+def adjust_get():
+    return jsonify({'status': 1, "msg": 'start rl adjust wrong'})
 
 
 class PPO(object):
     def __init__(self):
-        self.sess = tf.Session()
-        self.tfs = tf.placeholder(tf.float32, [None, S_DIM], 'state')
+        self.sess = tf.compat.v1.Session()
+        self.tfs = tf.compat.v1.placeholder(tf.float32, [None, S_DIM], 'state')
 
         # critic
         l1 = tf.layers.dense(self.tfs, 100, tf.nn.relu)
@@ -68,7 +65,7 @@ class PPO(object):
         self.tfdc_r = tf.placeholder(tf.float32, [None, 1], 'discounted_r')
         self.advantage = self.tfdc_r - self.v
         self.closs = tf.reduce_mean(tf.square(self.advantage))
-        self.ctrain_op = tf.train.AdamOptimizer(C_LR).minimize(self.closs)
+        self.ctrain_op = tf.compat.v1.train.AdamOptimizer(C_LR).minimize(self.closs)
 
         # actor
         pi, pi_params = self._build_anet('pi', trainable=True)
@@ -76,8 +73,8 @@ class PPO(object):
         self.sample_op = tf.squeeze(pi.sample(1), axis=0)  # operation of choosing action
         self.update_oldpi_op = [oldp.assign(p) for p, oldp in zip(pi_params, oldpi_params)]
 
-        self.tfa = tf.placeholder(tf.float32, [None, A_DIM], 'action')
-        self.tfadv = tf.placeholder(tf.float32, [None, 1], 'advantage')
+        self.tfa = tf.compat.v1.placeholder(tf.float32, [None, A_DIM], 'action')
+        self.tfadv = tf.compat.v1.placeholder(tf.float32, [None, 1], 'advantage')
         # ratio = tf.exp(pi.log_prob(self.tfa) - oldpi.log_prob(self.tfa))
         ratio = pi.prob(self.tfa) / (oldpi.prob(self.tfa) + 1e-5)
         surr = ratio * self.tfadv  # surrogate loss
@@ -87,24 +84,23 @@ class PPO(object):
             tf.clip_by_value(ratio, 1. - EPSILON, 1. + EPSILON) * self.tfadv))
 
         self.atrain_op = tf.train.AdamOptimizer(A_LR).minimize(self.aloss)
-        self.sess.run(tf.global_variables_initializer())
+        self.sess.run(tf.compat.v1.global_variables_initializer())
 
     def update(self):
         global GLOBAL_UPDATE_COUNTER
         while not COORD.should_stop():
-            if GLOBAL_EP < EP_MAX:
-                UPDATE_EVENT.wait()  # wait until get batch of data
-                self.sess.run(self.update_oldpi_op)  # copy pi to old pi
-                data = [QUEUE.get() for _ in range(QUEUE.qsize())]  # collect data from all workers
-                data = np.vstack(data)
-                s, a, r = data[:, :S_DIM], data[:, S_DIM: S_DIM + A_DIM], data[:, -1:]
-                adv = self.sess.run(self.advantage, {self.tfs: s, self.tfdc_r: r})
-                # update actor and critic in a update loop
-                [self.sess.run(self.atrain_op, {self.tfs: s, self.tfa: a, self.tfadv: adv}) for _ in range(UPDATE_STEP)]
-                [self.sess.run(self.ctrain_op, {self.tfs: s, self.tfdc_r: r}) for _ in range(UPDATE_STEP)]
-                UPDATE_EVENT.clear()  # updating finished
-                GLOBAL_UPDATE_COUNTER = 0  # reset counter
-                ROLLING_EVENT.set()  # set roll-out available
+            UPDATE_EVENT.wait()  # wait until get batch of data
+            self.sess.run(self.update_oldpi_op)  # copy pi to old pi
+            data = [QUEUE.get() for _ in range(QUEUE.qsize())]  # collect data from all workers
+            data = np.vstack(data)
+            s, a, r = data[:, :S_DIM], data[:, S_DIM: S_DIM + A_DIM], data[:, -1:]
+            adv = self.sess.run(self.advantage, {self.tfs: s, self.tfdc_r: r})
+            # update actor and critic in a update loop
+            [self.sess.run(self.atrain_op, {self.tfs: s, self.tfa: a, self.tfadv: adv}) for _ in range(UPDATE_STEP)]
+            [self.sess.run(self.ctrain_op, {self.tfs: s, self.tfdc_r: r}) for _ in range(UPDATE_STEP)]
+            UPDATE_EVENT.clear()  # updating finished
+            GLOBAL_UPDATE_COUNTER = 0  # reset counter
+            ROLLING_EVENT.set()  # set roll-out available
 
     def _build_anet(self, name, trainable):
         with tf.variable_scope(name):
@@ -116,13 +112,10 @@ class PPO(object):
         return norm_dist, params
 
     def choose_action(self, s):
-        if (type(s) is np.ndarray) & s.size > 0:
-            step_len = s[0]
-            s = s[np.newaxis, :]
-            a = self.sess.run(self.sample_op, {self.tfs: s})[0]
-            return np.clip(a, -step_len, step_len)
-        else:
-            return [0]
+        step_len = s[0]
+        s = s[np.newaxis, :]
+        a = self.sess.run(self.sample_op, {self.tfs: s})[0]
+        return np.clip(a, 0.5 * step_len, 1.5 * step_len)
 
     def get_v(self, s):
         if s.ndim < 2: s = s[np.newaxis, :]
@@ -137,7 +130,6 @@ class Worker(object):
 
     def work(self):
         global GLOBAL_EP, GLOBAL_RUNNING_R, GLOBAL_UPDATE_COUNTER
-
         while not COORD.should_stop():
             s = self.environment.reset()
             ep_r = 0
@@ -145,17 +137,16 @@ class Worker(object):
             for t in range(EP_LEN):
                 if not ROLLING_EVENT.is_set():  # while global PPO is updating
                     ROLLING_EVENT.wait()  # wait until PPO is updated
-                    buffer_s, buffer_a, buffer_r = [], [], []
-                    # clear history buffer, use new policy to collect data
+                    buffer_s, buffer_a, buffer_r = [], [], []  # clear history buffer
                 a = self.ppo.choose_action(s)
                 s_, r = self.environment.step(a)
                 buffer_s.append(s)
                 buffer_a.append(a)
-                buffer_r.append((r + 8) / 8)  # normalize reward, find to be useful
+                buffer_r.append(r)  # normalize reward, find to be useful
                 s = s_
                 ep_r += r
 
-                GLOBAL_UPDATE_COUNTER += 1  # count to minimum batch size, no need to wait other workers
+                GLOBAL_UPDATE_COUNTER += 1  # count to minimum batch size
                 if t == EP_LEN - 1 or GLOBAL_UPDATE_COUNTER >= MIN_BATCH_SIZE:
                     v_s_ = self.ppo.get_v(s_)
                     discounted_r = []  # compute discounted reward
@@ -166,7 +157,7 @@ class Worker(object):
 
                     bs, ba, br = np.vstack(buffer_s), np.vstack(buffer_a), np.array(discounted_r)[:, np.newaxis]
                     buffer_s, buffer_a, buffer_r = [], [], []
-                    QUEUE.put(np.hstack((bs, ba, br)))  # put data in the queue
+                    QUEUE.put(np.hstack((bs, ba, br)))
                     if GLOBAL_UPDATE_COUNTER >= MIN_BATCH_SIZE:
                         ROLLING_EVENT.clear()  # stop collecting data
                         UPDATE_EVENT.set()  # globalPPO update
@@ -184,46 +175,39 @@ class Worker(object):
             print('{0:.1f}%'.format(GLOBAL_EP / EP_MAX * 100), '|W%i' % self.wid, '|Ep_r: %.2f' % ep_r, )
 
 
-def adjust_job():
-    pool = redis.ConnectionPool(host=redis_json['host'], port=redis_json['port'], password=redis_json['password'])
-    r = redis.Redis(connection_pool=pool)
-    # r = redis.Redis(host=redis_json['host'], port=redis_json['port'])
-    keys = r.keys()
-    print(keys)
+def adjust_param(last_compress_point, key):
+    if key in environments:
+        env = environments[key]
+    else:
+        env = Adjust_env()
+        environments[key] = env
+    next_time = last_compress_point['nextTime']
+    comp_frequency = last_compress_point['compFrequency']
+    comp_error = last_compress_point['compError']
+    comp_dev_old = last_compress_point['compDev']
+    before_comp = last_compress_point['beforeComp']
+    after_comp = last_compress_point['afterComp']
+    comp_std = math.sqrt(comp_error / before_comp)
+    comp_proportion = before_comp / after_comp
+    update = {'comp_dev': comp_dev_old, 'comp_proportion': comp_proportion, 'comp_std': comp_std}
+    env.update(update)
+    s = env.getstate()
+    a = GLOBAL_PPO.choose_action(s)
+    s, r = env.step(a)
+    comp_dev = s[0]
 
-    for key in keys:
-        last_points = r.hgetall(key)
-        last_points_update = {}
-        # print(lastPoints)
-        for asset_point in last_points:
-            print(asset_point)
-            last_point = bytes.decode(py_snappy.decompress(last_points[asset_point]))
-            last_point_json = json.loads(last_point)
-            next_time = last_point_json['nextTime']
-            point_time = last_point_json['lastPoint']['ts']
-            if next_time <= point_time:
-                comp_frequency = last_point_json['compFrequency']
-                comp_error = last_point_json['compError']
-                before_comp = last_point_json['beforeComp']
-                after_comp = last_point_json['afterComp']
-                comp_std = math.sqrt(comp_error / before_comp)
-                comp_proportion = before_comp / after_comp
-                update = {'comp_proportion': comp_proportion, 'comp_std': comp_std}
-                env.update(update)
-                s = env.render()
-                comp_dev = env.step(GLOBAL_PPO.choose_action(s))[0][0]
-                last_point_json['compDev'] = comp_dev
-                last_point_json['nextTime'] = next_time + (comp_frequency % 60) * LAST_POINT_ADJUST_TIME
-                last_point_json['beforeSum'] = last_point_json['beforeSum'] + before_comp
-                last_point_json['afterSum'] = last_point_json['afterSum'] + after_comp
-                last_point_json['beforeComp'] = 0
-                last_point_json['afterComp'] = 0
-                last_point_json['compStd'] = last_point_json['compStd'] + comp_std
-                last_point_json['compError'] = 0
-                last_point_json['compFrequency'] = comp_frequency + 1
-                last_points_update[asset_point] = last_point_json
-        if len(last_points_update) > 0:
-            r.hmset(key, last_points_update)
+    last_compress_point['compDev'] = comp_dev
+    last_compress_point['nextTime'] = next_time + LAST_POINT_ADJUST_TIME
+    last_compress_point['beforeSum'] = last_compress_point['beforeSum'] + before_comp
+    last_compress_point['afterSum'] = last_compress_point['afterSum'] + after_comp
+    last_compress_point['beforeComp'] = 0
+    last_compress_point['afterComp'] = 0
+    last_compress_point['compStd'] = last_compress_point['compStd'] + comp_std
+    last_compress_point['compError'] = 0
+    last_compress_point['compFrequency'] = comp_frequency + 1
+
+    print('update', ' compDev from ', comp_dev_old, ' to ', comp_dev)
+    return last_compress_point
 
 
 if __name__ == '__main__':
@@ -237,22 +221,13 @@ if __name__ == '__main__':
     GLOBAL_RUNNING_R = []
     COORD = tf.train.Coordinator()
     QUEUE = queue.Queue()  # workers putting data in this queue
-    threads = []
-    for worker in workers:  # worker threads
-        t = threading.Thread(target=worker.work, args=())
-        t.start()  # training
-        threads.append(t)
-    # add a PPO updating thread
-    threads.append(threading.Thread(target=GLOBAL_PPO.update, ))
-    threads[-1].start()
-    COORD.join(threads)
 
     # plot reward change and test
-    plt.plot(np.arange(len(GLOBAL_RUNNING_R)), GLOBAL_RUNNING_R)
-    plt.xlabel('Episode')
-    plt.ylabel('Moving reward')
-    plt.ion()
-    plt.show()
+    # plt.plot(np.arange(len(GLOBAL_RUNNING_R)), GLOBAL_RUNNING_R)
+    # plt.xlabel('Episode')
+    # plt.ylabel('Moving reward')
+    # plt.ion()
+    # plt.show()
     app.run(host='0.0.0.0', port=8080, debug=True)
     adjust_get.run(host='0.0.0.0', port=8080, debug=True)
 
