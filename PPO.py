@@ -6,8 +6,6 @@ tensorflow r1.3
 
 import tensorflow as tf
 import numpy as np
-import matplotlib.pyplot as plt
-import traceback
 import threading
 import queue
 from environment import Adjust_env
@@ -38,11 +36,10 @@ def adjust():
         try:
             last_compress_point = request.json
             # print(last_compress_point)
-            key = last_compress_point['lastPoint']['assertId'] + '/' + last_compress_point['lastPoint'][
-                'modelId'] + '/' + last_compress_point['lastPoint']['measurement']
+            key = last_compress_point['key']
             print(key)
-            last_compress_point = adjust_param(last_compress_point, key)
-            return jsonify({'status': 0, "msg": 'OK', "data": last_compress_point})
+            comp_dev = adjust_param(last_compress_point, key)
+            return jsonify({'status': 0, "msg": 'OK', "data": comp_dev})
         except Exception as e:
             return jsonify({'status': 1, "msg": 'rl adjust had something wrong!'})
     else:
@@ -181,33 +178,17 @@ def adjust_param(last_compress_point, key):
     else:
         env = Adjust_env()
         environments[key] = env
-    next_time = last_compress_point['nextTime']
-    comp_frequency = last_compress_point['compFrequency']
-    comp_error = last_compress_point['compError']
-    comp_dev_old = last_compress_point['compDev']
-    before_comp = last_compress_point['beforeComp']
-    after_comp = last_compress_point['afterComp']
-    comp_std = math.sqrt(comp_error / before_comp)
-    comp_proportion = before_comp / after_comp
+    comp_dev_old = last_compress_point['comp_dev']
+    comp_std = last_compress_point['comp_std']
+    comp_proportion = last_compress_point['comp_proportion']
     update = {'comp_dev': comp_dev_old, 'comp_proportion': comp_proportion, 'comp_std': comp_std}
     env.update(update)
     s = env.getstate()
     a = GLOBAL_PPO.choose_action(s)
     s, r = env.step(a)
     comp_dev = s[0]
-
-    last_compress_point['compDev'] = comp_dev
-    last_compress_point['nextTime'] = next_time + LAST_POINT_ADJUST_TIME
-    last_compress_point['beforeSum'] = last_compress_point['beforeSum'] + before_comp
-    last_compress_point['afterSum'] = last_compress_point['afterSum'] + after_comp
-    last_compress_point['beforeComp'] = 0
-    last_compress_point['afterComp'] = 0
-    last_compress_point['compStd'] = last_compress_point['compStd'] + comp_std
-    last_compress_point['compError'] = 0
-    last_compress_point['compFrequency'] = comp_frequency + 1
-
     print('update', ' compDev from ', comp_dev_old, ' to ', comp_dev)
-    return last_compress_point
+    return comp_dev
 
 
 if __name__ == '__main__':
