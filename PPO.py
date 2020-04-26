@@ -19,11 +19,10 @@ import threading
 tf.disable_v2_behavior()
 app = Flask(__name__)
 
-EP_MAX = 1000
-EP_LEN = 280
-GAMMA = 0.9  # reward discount factor
-A_LR = 0.0001  # learning rate for actor
-C_LR = 0.0002  # learning rate for critic
+EP_LEN = 1700
+GAMMA = 0.99  # reward discount factor
+A_LR = 0.001  # learning rate for actor
+C_LR = 0.002  # learning rate for critic
 MIN_BATCH_SIZE = 64  # minimum batch size for updating PPO
 UPDATE_STEP = 10  # loop update operation n-steps
 EPSILON = 0.2  # for clipping surrogate objective
@@ -66,15 +65,15 @@ class PPO(object):
         self.ctrain_op = tf.train.AdamOptimizer(C_LR).minimize(self.closs)
 
         # actor
-        pi, pi_params = self._build_anet('pi', trainable=True)
-        oldpi, oldpi_params = self._build_anet('oldpi', trainable=False)
-        self.sample_op = tf.squeeze(pi.sample(1), axis=0)  # operation of choosing action
-        self.update_oldpi_op = [oldp.assign(p) for p, oldp in zip(pi_params, oldpi_params)]
+        actor, actor_params = self._build_anet('actor', trainable=True)
+        old_actor, old_actor_params = self._build_anet('old_actor', trainable=False)
+        self.sample_op = tf.squeeze(actor.sample(1), axis=0)  # operation of choosing action
+        self.update_old_actor_op = [oldp.assign(p) for p, oldp in zip(actor_params, old_actor_params)]
 
         self.tfa = tfv.placeholder(tf.float32, [None, A_DIM], 'action')
         self.tfadv = tfv.placeholder(tf.float32, [None, 1], 'advantage')
-        # ratio = tf.exp(pi.log_prob(self.tfa) - oldpi.log_prob(self.tfa))
-        ratio = pi.prob(self.tfa) / (oldpi.prob(self.tfa) + 1e-5)
+        # ratio = tf.exp(actor.log_prob(self.tfa) - old_actor.log_prob(self.tfa))
+        ratio = actor.prob(self.tfa) / (old_actor.prob(self.tfa) + 1e-5)
         surr = ratio * self.tfadv  # surrogate loss
 
         self.aloss = -tf.reduce_mean(tf.minimum(  # clipped surrogate objective
@@ -83,13 +82,14 @@ class PPO(object):
 
         self.atrain_op = tf.train.AdamOptimizer(A_LR).minimize(self.aloss)
         self.sess.run(tfv.global_variables_initializer())
-        writer = tf.compat.v1.summary.FileWriter("logs/", self.sess.graph)
+
+        writer = tfv.summary.FileWriter("logs/", self.sess.graph)
 
     def update(self):
         global GLOBAL_UPDATE_COUNTER
         while not COORD.should_stop():
             UPDATE_EVENT.wait()  # wait until get batch of data
-            self.sess.run(self.update_oldpi_op)  # copy pi to old pi
+            self.sess.run(self.update_old_actor_op)  # copy actor to old actor
             data = [QUEUE.get() for _ in range(QUEUE.qsize())]  # collect data from all workers
             data = np.vstack(data)
             s, a, r = data[:, :S_DIM], data[:, S_DIM: S_DIM + A_DIM], data[:, -1:]
@@ -113,7 +113,7 @@ class PPO(object):
     def choose_action(self, s):
         s = s[np.newaxis, :]
         a = self.sess.run(self.sample_op, {self.tfs: s})[0]
-        return np.clip(a, -1, 1)
+        return np.clip(a, -2, 2)
 
     def get_v(self, s):
         if s.ndim < 2: s = s[np.newaxis, :]
@@ -126,7 +126,7 @@ buffer_s, buffer_a, buffer_r = [], [], []
 
 
 def work(key, s, s_, a, r):
-    global GLOBAL_EP, GLOBAL_RUNNING_R, GLOBAL_UPDATE_COUNTER, buffer_s, buffer_a, buffer_r, ep_r, t
+    global GLOBAL_RUNNING_R, GLOBAL_UPDATE_COUNTER, buffer_s, buffer_a, buffer_r, ep_r, t
     if key in t:
         tk = t[key] + 1
     else:
@@ -138,10 +138,10 @@ def work(key, s, s_, a, r):
     buffer_s.append(s)
     buffer_a.append(a)
     buffer_r.append(r)  # normalize reward, find to be useful
-    s = s_
 
     ep_r += r
     GLOBAL_UPDATE_COUNTER += 1  # count to minimum batch size
+    t[key] += 1
     if tk == EP_LEN - 1 or GLOBAL_UPDATE_COUNTER >= MIN_BATCH_SIZE:
         v_s_ = GLOBAL_PPO.get_v(s_)
         discounted_r = []  # compute discounted reward
@@ -157,15 +157,12 @@ def work(key, s, s_, a, r):
             ROLLING_EVENT.clear()  # stop collecting data
             UPDATE_EVENT.set()  # globalPPO update
 
-        if GLOBAL_EP >= EP_MAX:  # stop training
-            COORD.request_stop()
-        t[key] = 0
     # record reward changes, plot later
     if len(GLOBAL_RUNNING_R[key]) == 0:
         GLOBAL_RUNNING_R[key].append(ep_r)
     else:
         GLOBAL_RUNNING_R[key].append(GLOBAL_RUNNING_R[key][-1] * 0.9 + ep_r * 0.1)
-    GLOBAL_EP += 1
+    # GLOBAL_RUNNING_R[key].append(r)
     print('{0:.1f}%'.format(tk / EP_LEN * 100), '|Ep_r: %.2f' % ep_r, )
 
 
@@ -182,17 +179,18 @@ def adjust_param(last_compress_point, key):
     comp_dev_old = last_compress_point['comp_dev']
     comp_std = last_compress_point['comp_std']
     comp_proportion = last_compress_point['comp_proportion']
-    update = {'comp_dev': comp_dev_old, 'comp_proportion': comp_proportion, 'comp_std': comp_std}
+    comp_step = last_compress_point['comp_step']
+    update = {'comp_dev': comp_dev_old, 'comp_proportion': comp_proportion, 'comp_std': comp_std, 'comp_step': comp_step}
     env.update(update)
     s = env.getstate()
     a = GLOBAL_PPO.choose_action(s)
     s_, r = env.step(a)
     comp_dev = s_[0]
-    if last_compress_point['comp_frequency'] <= 280:
+    if last_compress_point['comp_frequency'] < EP_LEN:
         thead_one = threading.Thread(target=work, args=(key, s, s_, a, r))
         thead_one.start()  # 准备就绪,等待cpu执行
         # GLOBAL_RUNNING_DEV[key].append([comp_dev, comp_proportion, comp_std])
-    elif last_compress_point['comp_frequency'] == 281:
+    elif last_compress_point['comp_frequency'] == EP_LEN:
         # plt.plot(np.arange(len(GLOBAL_RUNNING_DEV[key])), np.array(GLOBAL_RUNNING_DEV[key])[:, :1], label='comp_dev')
         # plt.plot(np.arange(len(GLOBAL_RUNNING_R[key])), np.array(GLOBAL_RUNNING_R[key])[:, :2], label='comp_proportion')
         # plt.plot(np.arange(len(GLOBAL_RUNNING_R[key])), np.array(GLOBAL_RUNNING_R[key])[:, :3], label='comp_std')
@@ -218,17 +216,16 @@ if __name__ == '__main__':
     ROLLING_EVENT.set()  # start to roll out
     # workers = [Worker(wid=i) for i in range(N_WORKER)]
 
-    GLOBAL_UPDATE_COUNTER, GLOBAL_EP = 0, 0
+    GLOBAL_UPDATE_COUNTER = 0
     GLOBAL_RUNNING_R = {}
     COORD = tf.train.Coordinator()
     QUEUE = queue.Queue()  # workers putting data in this queue
 
-    threads = []
-    threads.append(threading.Thread(target=GLOBAL_PPO.update,))
-    for n in threads:
-        n.start()
+    thread = threading.Thread(target=GLOBAL_PPO.update, )
+    thread.start()
+
     app.run(host='0.0.0.0', port=8080, debug=True)
     adjust_get.run(host='0.0.0.0', port=8080, debug=True)
-    COORD.join(threads)
+    COORD.join(thread)
 
     # env = Adjust_env()
