@@ -8,7 +8,7 @@ from flask import Flask
 from flask import jsonify
 from flask import request
 import threading
-
+import os
 
 EP_LEN = 1700
 GAMMA = 0.99  # reward discount factor
@@ -19,6 +19,7 @@ UPDATE_STEP = 10  # loop update operation n-steps
 EPSILON = 0.2  # for clipping surrogate objective
 S_DIM, A_DIM = 3, 1  # state and action dimension
 
+SAVE_PATH = "../model/"
 environments = {}
 t = {}
 ep_r = {}
@@ -50,6 +51,9 @@ def adjust_get():
 class PPO(object):
     def __init__(self):
         self.sess = tfv.Session()
+        if os.path.isfile(SAVE_PATH + 'model.meta'):
+            saver = tfv.train.import_meta_graph(SAVE_PATH + 'model.meta')
+            saver.restore(self.sess, tfv.train.latest_checkpoint(SAVE_PATH))
         self.tfs = tfv.placeholder(tfv.float32, [None, S_DIM], 'state')
 
         # critic
@@ -96,6 +100,7 @@ class PPO(object):
             UPDATE_EVENT.clear()  # updating finished
             GLOBAL_UPDATE_COUNTER = 0  # reset counter
             ROLLING_EVENT.set()  # set roll-out available
+            SAVER.save(self.sess, 'rl_model')
 
     def _build_anet(self, name, trainable):
         with tfv.variable_scope(name):
@@ -112,7 +117,8 @@ class PPO(object):
         return np.clip(a, -2, 2)
 
     def get_v(self, s):
-        if s.ndim < 2: s = s[np.newaxis, :]
+        if s.ndim < 2:
+            s = s[np.newaxis, :]
         return self.sess.run(self.v, {self.tfs: s})[0, 0]
 
 
@@ -197,6 +203,7 @@ if __name__ == '__main__':
     GLOBAL_UPDATE_COUNTER = 0
     GLOBAL_RUNNING_R = {}
     COORD = tfv.train.Coordinator()
+    SAVER = tfv.train.Saver()
     QUEUE = queue.Queue()  # workers putting data in this queue
 
     thread = threading.Thread(target=GLOBAL_PPO.update, )
