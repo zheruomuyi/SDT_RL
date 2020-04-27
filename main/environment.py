@@ -26,7 +26,7 @@ class Adjust_env(object):
 
     def step(self, action):
         comp_dev = min(self.comp_dev + (0.25 * action[0] * min(self.comp_dev, self.comp_step)), 10 * self.comp_step)
-        comp_dev = max(comp_dev, 0.1 * self.comp_step)
+        comp_dev = max(comp_dev, 0)
         # comp_dev = self.comp_dev + 0.125 * action[0] * self.comp_step
         self.comp_dev = comp_dev
         reward = 0
