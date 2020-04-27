@@ -1,22 +1,15 @@
-"""
-Dependencies:
-python:3.5
-tensorflow r1.3
-"""
-
 import tensorflow as tf
 import tensorflow.compat.v1 as tfv
 import numpy as np
 import queue
-from main.environment import Adjust_env
+from environment import Adjust_env
 import matplotlib.pyplot as plt
 from flask import Flask
 from flask import jsonify
 from flask import request
 import threading
 
-
-tf.disable_v2_behavior()
+tfv.disable_v2_behavior()
 app = Flask(__name__)
 
 EP_LEN = 1700
@@ -41,46 +34,46 @@ def adjust():
             comp_dev = adjust_param(last_compress_point, key)
             return jsonify({'status': 0, "msg": 'OK', "data": comp_dev})
         except Exception as e:
-            return jsonify({'status': 1, "msg": 'rl adjust had something wrong!'})
+            return jsonify({'status': 1, "msg": 'rl adjust had something wrong!' + e.__str__()})
     else:
         return jsonify({'status': 1, "msg": 'rl adjust api should be post'})
 
 
 @app.route('/adjust', methods=['GET'])
 def adjust_get():
-    return jsonify({'status': 1, "msg": 'start rl adjust wrong'})
+    return jsonify({'status': 0, "msg": 'OK'})
 
 
 class PPO(object):
     def __init__(self):
         self.sess = tfv.Session()
-        self.tfs = tfv.placeholder(tf.float32, [None, S_DIM], 'state')
+        self.tfs = tfv.placeholder(tfv.float32, [None, S_DIM], 'state')
 
         # critic
-        l1 = tf.layers.dense(self.tfs, 100, tf.nn.relu)
-        self.v = tf.layers.dense(l1, 1)
-        self.tfdc_r = tf.placeholder(tf.float32, [None, 1], 'discounted_r')
+        l1 = tfv.layers.dense(self.tfs, 100, tf.nn.relu)
+        self.v = tfv.layers.dense(l1, 1)
+        self.tfdc_r = tfv.placeholder(tfv.float32, [None, 1], 'discounted_r')
         self.advantage = self.tfdc_r - self.v
-        self.closs = tf.reduce_mean(tf.square(self.advantage))
-        self.ctrain_op = tf.train.AdamOptimizer(C_LR).minimize(self.closs)
+        self.closs = tfv.reduce_mean(tfv.square(self.advantage))
+        self.ctrain_op = tfv.train.AdamOptimizer(C_LR).minimize(self.closs)
 
         # actor
         actor, actor_params = self._build_anet('actor', trainable=True)
         old_actor, old_actor_params = self._build_anet('old_actor', trainable=False)
-        self.sample_op = tf.squeeze(actor.sample(1), axis=0)  # operation of choosing action
+        self.sample_op = tfv.squeeze(actor.sample(1), axis=0)  # operation of choosing action
         self.update_old_actor_op = [oldp.assign(p) for p, oldp in zip(actor_params, old_actor_params)]
 
-        self.tfa = tfv.placeholder(tf.float32, [None, A_DIM], 'action')
-        self.tfadv = tfv.placeholder(tf.float32, [None, 1], 'advantage')
+        self.tfa = tfv.placeholder(tfv.float32, [None, A_DIM], 'action')
+        self.tfadv = tfv.placeholder(tfv.float32, [None, 1], 'advantage')
         # ratio = tf.exp(actor.log_prob(self.tfa) - old_actor.log_prob(self.tfa))
         ratio = actor.prob(self.tfa) / (old_actor.prob(self.tfa) + 1e-5)
         surr = ratio * self.tfadv  # surrogate loss
 
-        self.aloss = -tf.reduce_mean(tf.minimum(  # clipped surrogate objective
+        self.aloss = -tfv.reduce_mean(tfv.minimum(  # clipped surrogate objective
             surr,
-            tf.clip_by_value(ratio, 1. - EPSILON, 1. + EPSILON) * self.tfadv))
+            tfv.clip_by_value(ratio, 1. - EPSILON, 1. + EPSILON) * self.tfadv))
 
-        self.atrain_op = tf.train.AdamOptimizer(A_LR).minimize(self.aloss)
+        self.atrain_op = tfv.train.AdamOptimizer(A_LR).minimize(self.aloss)
         self.sess.run(tfv.global_variables_initializer())
 
         writer = tfv.summary.FileWriter("logs/", self.sess.graph)
@@ -102,12 +95,12 @@ class PPO(object):
             ROLLING_EVENT.set()  # set roll-out available
 
     def _build_anet(self, name, trainable):
-        with tf.variable_scope(name):
-            l1 = tf.layers.dense(self.tfs, 200, tf.nn.relu, trainable=trainable)
-            mu = 2 * tf.layers.dense(l1, A_DIM, tf.nn.tanh, trainable=trainable)
-            sigma = tf.layers.dense(l1, A_DIM, tf.nn.softplus, trainable=trainable)
-            norm_dist = tf.distributions.Normal(loc=mu, scale=sigma)
-        params = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=name)
+        with tfv.variable_scope(name):
+            l1 = tfv.layers.dense(self.tfs, 200, tfv.nn.relu, trainable=trainable)
+            mu = 2 * tfv.layers.dense(l1, A_DIM, tfv.nn.tanh, trainable=trainable)
+            sigma = tfv.layers.dense(l1, A_DIM, tfv.nn.softplus, trainable=trainable)
+            norm_dist = tfv.distributions.Normal(loc=mu, scale=sigma)
+        params = tfv.get_collection(tfv.GraphKeys.GLOBAL_VARIABLES, scope=name)
         return norm_dist, params
 
     def choose_action(self, s):
@@ -180,7 +173,8 @@ def adjust_param(last_compress_point, key):
     comp_std = last_compress_point['comp_std']
     comp_proportion = last_compress_point['comp_proportion']
     comp_step = last_compress_point['comp_step']
-    update = {'comp_dev': comp_dev_old, 'comp_proportion': comp_proportion, 'comp_std': comp_std, 'comp_step': comp_step}
+    update = {'comp_dev': comp_dev_old, 'comp_proportion': comp_proportion, 'comp_std': comp_std,
+              'comp_step': comp_step}
     env.update(update)
     s = env.getstate()
     a = GLOBAL_PPO.choose_action(s)
@@ -202,7 +196,7 @@ def adjust_param(last_compress_point, key):
         plt.plot(np.arange(len(GLOBAL_RUNNING_R[key])), GLOBAL_RUNNING_R[key])
         plt.xlabel(key)
         plt.ylabel('reward')
-        plt.ion()
+        plt.savefig('../image/' + key + '.jpg')
         plt.show()
 
     print('update', ' compDev from ', comp_dev_old, ' to ', comp_dev)
@@ -218,7 +212,7 @@ if __name__ == '__main__':
 
     GLOBAL_UPDATE_COUNTER = 0
     GLOBAL_RUNNING_R = {}
-    COORD = tf.train.Coordinator()
+    COORD = tfv.train.Coordinator()
     QUEUE = queue.Queue()  # workers putting data in this queue
 
     thread = threading.Thread(target=GLOBAL_PPO.update, )
