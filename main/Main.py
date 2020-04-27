@@ -9,8 +9,6 @@ from flask import jsonify
 from flask import request
 import threading
 
-tfv.disable_v2_behavior()
-app = Flask(__name__)
 
 EP_LEN = 1700
 GAMMA = 0.99  # reward discount factor
@@ -20,7 +18,13 @@ MIN_BATCH_SIZE = 64  # minimum batch size for updating PPO
 UPDATE_STEP = 10  # loop update operation n-steps
 EPSILON = 0.2  # for clipping surrogate objective
 S_DIM, A_DIM = 3, 1  # state and action dimension
+
 environments = {}
+t = {}
+ep_r = {}
+buffer_s, buffer_a, buffer_r = [], [], []
+tfv.disable_v2_behavior()
+app = Flask(__name__)
 
 
 @app.route('/adjust', methods=['POST'])
@@ -28,7 +32,6 @@ def adjust():
     if request.method == 'POST':
         try:
             last_compress_point = request.json
-            # print(last_compress_point)
             key = last_compress_point['key']
             print(key)
             comp_dev = adjust_param(last_compress_point, key)
@@ -65,8 +68,8 @@ class PPO(object):
 
         self.tfa = tfv.placeholder(tfv.float32, [None, A_DIM], 'action')
         self.tfadv = tfv.placeholder(tfv.float32, [None, 1], 'advantage')
-        # ratio = tf.exp(actor.log_prob(self.tfa) - old_actor.log_prob(self.tfa))
-        ratio = actor.prob(self.tfa) / (old_actor.prob(self.tfa) + 1e-5)
+        ratio = tfv.exp(actor.log_prob(self.tfa) - old_actor.log_prob(self.tfa))
+        # ratio = actor.prob(self.tfa) / (old_actor.prob(self.tfa) + 1e-5)
         surr = ratio * self.tfadv  # surrogate loss
 
         self.aloss = -tfv.reduce_mean(tfv.minimum(  # clipped surrogate objective
@@ -113,17 +116,13 @@ class PPO(object):
         return self.sess.run(self.v, {self.tfs: s})[0, 0]
 
 
-t = {}
-ep_r = 0
-buffer_s, buffer_a, buffer_r = [], [], []
-
-
 def work(key, s, s_, a, r):
     global GLOBAL_RUNNING_R, GLOBAL_UPDATE_COUNTER, buffer_s, buffer_a, buffer_r, ep_r, t
     if key in t:
         tk = t[key] + 1
     else:
         t[key] = 1
+        ep_r[key] = 0
         tk = 1
     if not ROLLING_EVENT.is_set():  # while global PPO is updating
         ROLLING_EVENT.wait()  # wait until PPO is updated
@@ -132,7 +131,7 @@ def work(key, s, s_, a, r):
     buffer_a.append(a)
     buffer_r.append(r)  # normalize reward, find to be useful
 
-    ep_r += r
+    ep_r[key] += r
     GLOBAL_UPDATE_COUNTER += 1  # count to minimum batch size
     t[key] += 1
     if tk == EP_LEN - 1 or GLOBAL_UPDATE_COUNTER >= MIN_BATCH_SIZE:
@@ -152,14 +151,11 @@ def work(key, s, s_, a, r):
 
     # record reward changes, plot later
     if len(GLOBAL_RUNNING_R[key]) == 0:
-        GLOBAL_RUNNING_R[key].append(ep_r)
+        GLOBAL_RUNNING_R[key].append(ep_r[key])
     else:
-        GLOBAL_RUNNING_R[key].append(GLOBAL_RUNNING_R[key][-1] * 0.9 + ep_r * 0.1)
-    # GLOBAL_RUNNING_R[key].append(r)
-    print('{0:.1f}%'.format(tk / EP_LEN * 100), '|Ep_r: %.2f' % ep_r, )
+        GLOBAL_RUNNING_R[key].append(GLOBAL_RUNNING_R[key][-1] * 0.9 + ep_r[key] * 0.1)
+    print('{0:.1f}%'.format(tk / EP_LEN * 100), '|Ep_r' + key + ': %.2f' % ep_r[key], )
 
-
-# GLOBAL_RUNNING_DEV = {}
 
 def adjust_param(last_compress_point, key):
     if key in environments:
@@ -167,7 +163,6 @@ def adjust_param(last_compress_point, key):
     else:
         env = Adjust_env()
         environments[key] = env
-        # GLOBAL_RUNNING_DEV[key] = []
         GLOBAL_RUNNING_R[key] = []
     comp_dev_old = last_compress_point['comp_dev']
     comp_std = last_compress_point['comp_std']
@@ -183,16 +178,7 @@ def adjust_param(last_compress_point, key):
     if last_compress_point['comp_frequency'] < EP_LEN:
         thead_one = threading.Thread(target=work, args=(key, s, s_, a, r))
         thead_one.start()  # 准备就绪,等待cpu执行
-        # GLOBAL_RUNNING_DEV[key].append([comp_dev, comp_proportion, comp_std])
     elif last_compress_point['comp_frequency'] == EP_LEN:
-        # plt.plot(np.arange(len(GLOBAL_RUNNING_DEV[key])), np.array(GLOBAL_RUNNING_DEV[key])[:, :1], label='comp_dev')
-        # plt.plot(np.arange(len(GLOBAL_RUNNING_R[key])), np.array(GLOBAL_RUNNING_R[key])[:, :2], label='comp_proportion')
-        # plt.plot(np.arange(len(GLOBAL_RUNNING_R[key])), np.array(GLOBAL_RUNNING_R[key])[:, :3], label='comp_std')
-        # plt.xlabel('Adjust')
-        # plt.ylabel('Compressed parameters')
-        # plt.ion()
-        # plt.show()
-        # del GLOBAL_RUNNING_DEV[key]
         plt.plot(np.arange(len(GLOBAL_RUNNING_R[key])), GLOBAL_RUNNING_R[key])
         plt.xlabel(key)
         plt.ylabel('reward')
@@ -208,8 +194,6 @@ if __name__ == '__main__':
     UPDATE_EVENT, ROLLING_EVENT = threading.Event(), threading.Event()
     UPDATE_EVENT.clear()  # not update now
     ROLLING_EVENT.set()  # start to roll out
-    # workers = [Worker(wid=i) for i in range(N_WORKER)]
-
     GLOBAL_UPDATE_COUNTER = 0
     GLOBAL_RUNNING_R = {}
     COORD = tfv.train.Coordinator()
@@ -221,5 +205,3 @@ if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080, debug=True)
     adjust_get.run(host='0.0.0.0', port=8080, debug=True)
     COORD.join(thread)
-
-    # env = Adjust_env()
