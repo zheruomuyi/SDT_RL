@@ -12,14 +12,14 @@ import os
 
 EP_LEN = 1700
 GAMMA = 0.99  # reward discount factor
-A_LR = 0.001  # learning rate for actor
-C_LR = 0.002  # learning rate for critic
+A_LR = 0.0001  # learning rate for actor
+C_LR = 0.0002  # learning rate for critic
 MIN_BATCH_SIZE = 64  # minimum batch size for updating PPO
 UPDATE_STEP = 10  # loop update operation n-steps
 EPSILON = 0.2  # for clipping surrogate objective
 S_DIM, A_DIM = 3, 1  # state and action dimension
 
-SAVE_PATH = "../model/"
+SAVE_PATH = "../model/rl_model"
 environments = {}
 t = {}
 ep_r = {}
@@ -51,18 +51,16 @@ def adjust_get():
 class PPO(object):
     def __init__(self):
         self.sess = tfv.Session()
-        if os.path.isfile(SAVE_PATH + 'model.meta'):
-            saver = tfv.train.import_meta_graph(SAVE_PATH + 'model.meta')
-            saver.restore(self.sess, tfv.train.latest_checkpoint(SAVE_PATH))
         self.tfs = tfv.placeholder(tfv.float32, [None, S_DIM], 'state')
 
         # critic
-        l1 = tfv.layers.dense(self.tfs, 100, tf.nn.relu)
-        self.v = tfv.layers.dense(l1, 1)
-        self.tfdc_r = tfv.placeholder(tfv.float32, [None, 1], 'discounted_r')
+        with tf.variable_scope("critic"):
+            l1 = tf.layers.dense(self.tfs, 100, tf.nn.relu)
+            self.v = tf.layers.dense(l1, 1)
+        self.tfdc_r = tfv.placeholder(tfv.float32, [None, 1], 'reward')
         self.advantage = self.tfdc_r - self.v
         self.closs = tfv.reduce_mean(tfv.square(self.advantage))
-        self.ctrain_op = tfv.train.AdamOptimizer(C_LR).minimize(self.closs)
+        self.ctrain_op = tf.train.AdamOptimizer(C_LR).minimize(self.closs)
 
         # actor
         actor, actor_params = self._build_anet('actor', trainable=True)
@@ -80,10 +78,10 @@ class PPO(object):
             surr,
             tfv.clip_by_value(ratio, 1. - EPSILON, 1. + EPSILON) * self.tfadv))
 
-        self.atrain_op = tfv.train.AdamOptimizer(A_LR).minimize(self.aloss)
+        self.atrain_op = tf.train.AdamOptimizer(A_LR).minimize(self.aloss)
         self.sess.run(tfv.global_variables_initializer())
 
-        writer = tfv.summary.FileWriter("logs/", self.sess.graph)
+        self.writer = tf.summary.FileWriter("../logs/", self.sess.graph)
 
     def update(self):
         global GLOBAL_UPDATE_COUNTER
@@ -100,14 +98,13 @@ class PPO(object):
             UPDATE_EVENT.clear()  # updating finished
             GLOBAL_UPDATE_COUNTER = 0  # reset counter
             ROLLING_EVENT.set()  # set roll-out available
-            SAVER.save(self.sess, 'rl_model')
 
     def _build_anet(self, name, trainable):
         with tfv.variable_scope(name):
-            l1 = tfv.layers.dense(self.tfs, 200, tfv.nn.relu, trainable=trainable)
-            mu = 2 * tfv.layers.dense(l1, A_DIM, tfv.nn.tanh, trainable=trainable)
-            sigma = tfv.layers.dense(l1, A_DIM, tfv.nn.softplus, trainable=trainable)
-            norm_dist = tfv.distributions.Normal(loc=mu, scale=sigma)
+            l1 = tf.layers.dense(self.tfs, 200, tf.nn.relu, trainable=trainable)
+            mu = 2 * tf.layers.dense(l1, A_DIM, tf.nn.tanh, trainable=trainable)
+            sigma = tf.layers.dense(l1, A_DIM, tf.nn.softplus, trainable=trainable)
+            norm_dist = tf.distributions.Normal(loc=mu, scale=sigma)
         params = tfv.get_collection(tfv.GraphKeys.GLOBAL_VARIABLES, scope=name)
         return norm_dist, params
 
@@ -124,23 +121,19 @@ class PPO(object):
 
 def work(key, s, s_, a, r):
     global GLOBAL_RUNNING_R, GLOBAL_UPDATE_COUNTER, buffer_s, buffer_a, buffer_r, ep_r, t
-    if key in t:
-        tk = t[key] + 1
-    else:
-        t[key] = 1
+    if key not in ep_r:
         ep_r[key] = 0
-        tk = 1
-    if not ROLLING_EVENT.is_set():  # while global PPO is updating
-        ROLLING_EVENT.wait()  # wait until PPO is updated
-        buffer_s, buffer_a, buffer_r = [], [], []  # clear history buffer
     buffer_s.append(s)
     buffer_a.append(a)
     buffer_r.append(r)  # normalize reward, find to be useful
+    if not ROLLING_EVENT.is_set():  # while global PPO is updating
+        ROLLING_EVENT.wait()  # wait until PPO is updated
+        buffer_s, buffer_a, buffer_r = [], [], []  # clear history buffer
 
     ep_r[key] += r
     GLOBAL_UPDATE_COUNTER += 1  # count to minimum batch size
     t[key] += 1
-    if tk == EP_LEN - 1 or GLOBAL_UPDATE_COUNTER >= MIN_BATCH_SIZE:
+    if GLOBAL_UPDATE_COUNTER >= MIN_BATCH_SIZE:
         v_s_ = GLOBAL_PPO.get_v(s_)
         discounted_r = []  # compute discounted reward
         for r in buffer_r[::-1]:
@@ -154,22 +147,25 @@ def work(key, s, s_, a, r):
         if GLOBAL_UPDATE_COUNTER >= MIN_BATCH_SIZE:
             ROLLING_EVENT.clear()  # stop collecting data
             UPDATE_EVENT.set()  # globalPPO update
+            SAVER.save(GLOBAL_PPO.sess, SAVE_PATH)
+            GLOBAL_UPDATE_COUNTER = 0
 
     # record reward changes, plot later
     if len(GLOBAL_RUNNING_R[key]) == 0:
         GLOBAL_RUNNING_R[key].append(ep_r[key])
     else:
         GLOBAL_RUNNING_R[key].append(GLOBAL_RUNNING_R[key][-1] * 0.9 + ep_r[key] * 0.1)
-    print('{0:.1f}%'.format(tk / EP_LEN * 100), '|Ep_r' + key + ': %.2f' % ep_r[key], )
+    print('{0:.1f}%'.format(t[key] / EP_LEN * 100), '|Ep_r' + key + ': %.2f' % ep_r[key], )
 
 
 def adjust_param(last_compress_point, key):
-    if key in environments:
+    if key in environments and key in GLOBAL_RUNNING_R and key in t:
         env = environments[key]
     else:
         env = Adjust_env()
         environments[key] = env
         GLOBAL_RUNNING_R[key] = []
+        t[key] = 1
     comp_dev_old = last_compress_point['comp_dev']
     comp_std = last_compress_point['comp_std']
     comp_proportion = last_compress_point['comp_proportion']
@@ -181,10 +177,9 @@ def adjust_param(last_compress_point, key):
     a = GLOBAL_PPO.choose_action(s)
     s_, r = env.step(a)
     comp_dev = s_[0]
-    if last_compress_point['comp_frequency'] < EP_LEN:
-        thead_one = threading.Thread(target=work, args=(key, s, s_, a, r))
-        thead_one.start()  # 准备就绪,等待cpu执行
-    elif last_compress_point['comp_frequency'] == EP_LEN:
+    thead_one = threading.Thread(target=work, args=(key, s, s_, a, r))
+    thead_one.start()  # 准备就绪,等待cpu执行
+    if t[key] == EP_LEN:
         plt.plot(np.arange(len(GLOBAL_RUNNING_R[key])), GLOBAL_RUNNING_R[key])
         plt.xlabel(key)
         plt.ylabel('reward')
@@ -196,14 +191,17 @@ def adjust_param(last_compress_point, key):
 
 
 if __name__ == '__main__':
-    GLOBAL_PPO = PPO()
+
     UPDATE_EVENT, ROLLING_EVENT = threading.Event(), threading.Event()
+    GLOBAL_PPO = PPO()
     UPDATE_EVENT.clear()  # not update now
     ROLLING_EVENT.set()  # start to roll out
+    COORD = tf.train.Coordinator()
+    SAVER = tf.train.Saver()
+    if os.path.isfile(SAVE_PATH + '.meta'):
+        SAVER.restore(GLOBAL_PPO.sess, SAVE_PATH)
     GLOBAL_UPDATE_COUNTER = 0
     GLOBAL_RUNNING_R = {}
-    COORD = tfv.train.Coordinator()
-    SAVER = tfv.train.Saver()
     QUEUE = queue.Queue()  # workers putting data in this queue
 
     thread = threading.Thread(target=GLOBAL_PPO.update, )
