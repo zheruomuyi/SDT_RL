@@ -1,10 +1,7 @@
 import numpy as np
 
-LAST_POINT_ADJUST_TIME = 30000
-
 
 class Adjust_env(object):
-
     def __init__(self):
         self.comp_dev = 0
         self.comp_std = 0
@@ -50,10 +47,5 @@ class Adjust_env(object):
         self.comp_step = update['comp_step']
 
     def getstate(self):
-        proportion_ratio, std_ratio = 0, 0
-        if self.comp_proportion != 0:
-            proportion_ratio = self.comp_proportion / self.last_comp_proportion
-        if self.comp_std != 0:
-            std_ratio = self.comp_std / self.last_comp_std
-        self.s = np.hstack([self.comp_dev, proportion_ratio, std_ratio])
+        self.s = np.hstack([self.comp_dev, self.comp_proportion, self.comp_std])
         return self.s
