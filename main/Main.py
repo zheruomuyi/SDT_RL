@@ -37,13 +37,13 @@ class DPPO_class(object):
         self.tfs = tfv.placeholder(tfv.float32, [None, S_DIM], 'state')
 
         # critic
-        with tf.variable_scope("critic"):
-            l1 = tf.layers.dense(self.tfs, 100, tf.nn.relu)
-            self.v = tf.layers.dense(l1, 1)
+        with tfv.variable_scope("critic"):
+            l1 = tfv.layers.dense(self.tfs, 100, tf.nn.relu)
+            self.v = tfv.layers.dense(l1, 1)
         self.tfdc_r = tfv.placeholder(tfv.float32, [None, 1], 'reward')
         self.advantage = self.tfdc_r - self.v
         self.closs = tfv.reduce_mean(tfv.square(self.advantage))
-        self.ctrain_op = tf.train.AdamOptimizer(C_LR).minimize(self.closs)
+        self.ctrain_op = tfv.train.AdamOptimizer(C_LR).minimize(self.closs)
 
         # actor
         actor, actor_params = self._build_anet('actor', trainable=True)
@@ -61,10 +61,10 @@ class DPPO_class(object):
             surr,
             tfv.clip_by_value(ratio, 1. - EPSILON, 1. + EPSILON) * self.tfadv))
 
-        self.atrain_op = tf.train.AdamOptimizer(A_LR).minimize(self.aloss)
+        self.atrain_op = tfv.train.AdamOptimizer(A_LR).minimize(self.aloss)
         self.sess.run(tfv.global_variables_initializer())
 
-        self.writer = tf.summary.FileWriter("../logs/", self.sess.graph)
+        self.writer = tfv.summary.FileWriter("../logs/", self.sess.graph)
 
     def update(self):
         self.sess.run(self.update_old_actor_op)  # copy actor to old actor
@@ -84,10 +84,10 @@ class DPPO_class(object):
 
     def _build_anet(self, name, trainable):
         with tfv.variable_scope(name):
-            l1 = tf.layers.dense(self.tfs, 200, tf.nn.relu, trainable=trainable)
-            mu = 2 * tf.layers.dense(l1, A_DIM, tf.nn.tanh, trainable=trainable)
-            sigma = tf.layers.dense(l1, A_DIM, tf.nn.softplus, trainable=trainable)
-            norm_dist = tf.distributions.Normal(loc=mu, scale=sigma)
+            l1 = tfv.layers.dense(self.tfs, 200, tf.nn.relu, trainable=trainable)
+            mu = 2 * tfv.layers.dense(l1, A_DIM, tf.nn.tanh, trainable=trainable)
+            sigma = tfv.layers.dense(l1, A_DIM, tf.nn.softplus, trainable=trainable)
+            norm_dist = tfv.distributions.Normal(loc=mu, scale=sigma)
         params = tfv.get_collection(tfv.GraphKeys.GLOBAL_VARIABLES, scope=name)
         return norm_dist, params
 
@@ -143,12 +143,12 @@ def adjust_param(last_compress_point, key):
     comp_dev = s_[0]
     thead_one = threading.Thread(target=work, args=(key, s, s_, a, r))
     thead_one.start()  # 准备就绪,等待cpu执行
-    # if t[key] == EP_LEN:
-    #     plt.plot(np.arange(len(GLOBAL_RUNNING_R[key])), GLOBAL_RUNNING_R[key])
-    #     plt.xlabel(key)
-    #     plt.ylabel('reward')
-    #     plt.savefig('../image/' + key + '.jpg')
-    #     plt.show()
+    if t[key] == EP_LEN:
+        plt.plot(np.arange(len(GLOBAL_RUNNING_R[key])), GLOBAL_RUNNING_R[key])
+        plt.xlabel(key)
+        plt.ylabel('reward')
+        plt.savefig('../image/' + key + '.jpg')
+        plt.show()
 
     print('update', ' compDev from ', comp_dev_old, ' to ', comp_dev)
     return comp_dev
@@ -170,7 +170,7 @@ def work(key, s, s_, a, r):
     t[key] += 1
     if GLOBAL_UPDATE_COUNTER >= MIN_BATCH_SIZE:
         v_s_ = GLOBAL_PPO.get_v(s_)
-        discounted_r = []  # compute discounted reward
+        discounted_r = []   # compute discounted reward
         for r in buffer_r[::-1]:
             v_s_ = r + GAMMA * v_s_
             discounted_r.append(v_s_)
@@ -196,7 +196,7 @@ if __name__ == '__main__':
     UPDATE_EVENT.clear()  # not update now
     ROLLING_EVENT.set()  # start to roll out
     COORD = tf.train.Coordinator()
-    SAVER = tf.train.Saver()
+    SAVER = tfv.train.Saver()
     if os.path.isfile(SAVE_PATH + '.meta'):
         SAVER.restore(GLOBAL_PPO.sess, SAVE_PATH)
     GLOBAL_UPDATE_COUNTER = 0
